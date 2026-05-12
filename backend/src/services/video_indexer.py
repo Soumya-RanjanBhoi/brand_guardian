@@ -1,12 +1,12 @@
 import logging
 import os
 import time,requests
-
 import boto3
 import yt_dlp
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger("video-indexer")
+
 
 
 class VideoIndexerService:
@@ -21,15 +21,22 @@ class VideoIndexerService:
         self.transcribe_client = boto3.client('transcribe', region_name=self.region)
         self.rekognition_client = boto3.client('rekognition', region_name=self.region)
 
+
     def download_youtube_video(self, url, output_path="temp_video.mp4"):
         """Download YouTube video using yt_dlp."""
         logger.info(f"Downloading YouTube video: {url}")
 
         ydl_opts = {
-            'format': 'best[ext==mp4]',
+            'format': 'best[ext=mp4]',
             'outtmpl': output_path,
             'quiet': True,
-            'overwrites': True
+            'overwrites': True,
+            'no_warning':False,
+
+            'extractor_args': {'youtube':{'player_client':['android','web']}},
+            'http_headers':{
+                'User-Agent':'Mozilla/5.0 (Window NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
         }
 
         try:
@@ -110,7 +117,11 @@ class VideoIndexerService:
         raise TimeoutError(f"Transcription job '{job_name}' timed out after {timeout}s")
 
     def wait_for_rekognition(self, job_id, job_type="label", poll_interval=10, timeout=600):
-        """Poll Rekognition job until complete. job_type: 'label' or 'text'."""
+        """
+
+        Poll Rekognition job until complete. job_type: 'label' or 'text'.
+        
+        """
         logger.info(f"Waiting for Rekognition {job_type} job: {job_id}")
         elapsed = 0
 
@@ -136,7 +147,10 @@ class VideoIndexerService:
         raise TimeoutError(f"Rekognition job '{job_id}' timed out after {timeout}s")
     
     def start_transcription(self, video_name):
-        """Start a Transcribe job for the uploaded video."""
+
+        """
+        Start a Transcribe job for the uploaded video.
+        """
         s3_uri = f"s3://{self.bucket_name}/videos/{video_name}.mp4"
         job_name = f"transcribe-{video_name}-{int(time.time())}"
 
@@ -151,7 +165,9 @@ class VideoIndexerService:
 
 
     def start_rekognition(self, video_name):
-        """Start Rekognition label + text detection jobs."""
+        """
+        Start Rekognition label + text detection jobs.
+        """
         s3_obj = {'S3Object': {'Bucket': self.bucket_name, 'Name': f'videos/{video_name}.mp4'}}
 
         label_job = self.rekognition_client.start_label_detection(
@@ -167,7 +183,9 @@ class VideoIndexerService:
 
 
     def extract_data(self, transcript, label_response, text_response):
-        """Combine transcript, labels and OCR into clean state dict."""
+        """
+        Combine transcript, labels and OCR into clean state dict.
+        """
         labels = list(set([
             l['Label']['Name'] for l in label_response.get('Labels', [])
         ]))
@@ -187,7 +205,9 @@ class VideoIndexerService:
 
 
     def wait_for_processing(self, video_name, retries=5, delay=5):
-        """Verify the video was successfully uploaded to S3."""
+        """
+        Verify the video was successfully uploaded to S3.
+        """
         s3_key = f"videos/{video_name}.mp4"
         logger.info(f"Verifying upload for: s3://{self.bucket_name}/{s3_key}")
 

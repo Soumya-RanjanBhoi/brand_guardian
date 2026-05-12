@@ -1,5 +1,6 @@
 import json, os, logging
 import re
+from pinecone import Pinecone,ServerlessSpec
 from typing import Dict, Any
 from dotenv import load_dotenv
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
@@ -12,6 +13,7 @@ from backend.src.services.video_indexer import VideoIndexerService
 logger = logging.getLogger("Brand Guardian")
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
+
 
 
 def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
@@ -66,7 +68,9 @@ def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
 
 
 def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
-    """RAG operation to audit the video content against compliance rules."""
+    """
+    RAG operation to audit the video content against compliance rules.
+    """
 
     logger.info("[Node: Auditor] Querying knowledge base")
 
@@ -78,15 +82,34 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
             "final_report": "Audit skipped — video processing failed (no transcript)"
         }
 
-    llm = ChatMistralAI()
+    llm = ChatMistralAI(model_name="mistral-large-latest")
+
     embeddings = MistralAIEmbeddings(
             api_key=os.getenv("MISTRAL_API_KEY"),
             model="mistral-embed"
     )
 
+    pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+
+    index_name = os.environ.get("PINECONE_INDEX_NAME")
+
+    pc.create_index(
+        name="compliance-rules",dimension=1024,metric="cosine",
+        spec=ServerlessSpec(
+            cloud="aws",
+            region="us-east-1"
+        )
+    )
+
+    
+    if index_name is None:
+        raise RuntimeError("PINECONE_INDEX_NAME environment variable is required")
+    
+    print("index created successfully")
+    index = pc.Index(index_name)
+
     vector_store = PineconeVectorStore(
-        index=os.environ.get("PINECONE_INDEX_NAME"),
-        pinecone_api_key=os.environ.get("PINECONE_API_KEY"),
+        index=index,
         embedding=embeddings
     )
 
