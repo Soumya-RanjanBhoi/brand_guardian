@@ -38,6 +38,7 @@ def index_docs():
 
     
     try:
+        index_name = os.environ.get("PINECONE_INDEX_NAME","")
         logger.info("Logging into Pinecone ... ")
         vector_store=PineconeVectorStore(
             pinecone_api_key=os.getenv("PINECONE_API_KEY"),

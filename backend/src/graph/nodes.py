@@ -1,5 +1,5 @@
 import json, os, logging
-import re
+import re,uuid
 from pinecone import Pinecone,ServerlessSpec
 from typing import Dict, Any
 from dotenv import load_dotenv
@@ -7,7 +7,7 @@ from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.api.telemetry import *
+from backend.src.api.telemetry import *
 from backend.src.graph.state import *
 from backend.src.services.video_indexer import VideoIndexerService
 
@@ -58,7 +58,7 @@ def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
             transcribe_job_name = vi_service.start_transcription(video_id_input)
             label_job_id, text_job_id = vi_service.start_rekognition(video_id_input)
 
-        with MetricTimer("RekongitionDuration",{"VideoId":{video_id_input}}):
+        with MetricTimer("RekongitionDuration",{"VideoId":video_id_input}):
             transcript = vi_service.wait_for_transcription(job_name=transcribe_job_name)
             label_response = vi_service.wait_for_rekognition(job_id=label_job_id, job_type="label")
             text_response = vi_service.wait_for_rekognition(job_id=text_job_id, job_type="text")
@@ -108,20 +108,25 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
     pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
     index_name = os.environ.get("PINECONE_INDEX_NAME")
-
-    pc.create_index(
-        name="compliance-rules",dimension=1024,metric="cosine",
-        spec=ServerlessSpec(
-            cloud="aws",
-            region="us-east-1"
-        )
-    )
-
+    pc_indexes= [index.name for index in pc.list_indexes()]
     
+    if index_name not in pc_indexes:
+        pc.create_index(
+            name=index_name,dimension=1024,metric="cosine",
+            spec=ServerlessSpec(
+                cloud="aws",
+                region="us-east-1"
+            )
+        )
+        print("index created successfully")
+        logger.info(f"New Index Created : {index_name}")
+    
+    print("index already exists")
+    logger.info(f"Index already exist : {index_name}")
     if index_name is None:
         raise RuntimeError("PINECONE_INDEX_NAME environment variable is required")
     
-    print("index created successfully")
+    
     index = pc.Index(index_name)
 
     vector_store = PineconeVectorStore(
@@ -191,7 +196,7 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
             violations=len(violation),
             duration_ms=total_time
         )
-        
+
         return {
             "compliance_result": audit_data.get("compliance_results", []),
             "final_result": audit_data.get("status", "FAIL"),
