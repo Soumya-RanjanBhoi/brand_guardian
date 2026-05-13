@@ -7,6 +7,7 @@ from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from src.api.telemetry import *
 from backend.src.graph.state import *
 from backend.src.services.video_indexer import VideoIndexerService
 
@@ -17,10 +18,14 @@ load_dotenv()
 
 
 def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
-    """Download, upload and process video through AWS Transcribe + Rekognition."""
+
+    """
+    Download, upload and process video through AWS Transcribe + Rekognition.
+    """
 
     video_url = state.get("video_url")
     video_id_input = state.get("video_id", "vid_demo")
+    start=time.time()
 
     logger.info(f"[Node:Indexer] Processing: {video_url}")
     local_filename = 'temp_audit_video.mp4'
@@ -29,16 +34,19 @@ def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
         vi_service = VideoIndexerService()
 
         if "youtube.com" in video_url or "youtu.be" in video_url:
-            local_path = vi_service.download_youtube_video(video_url, output_path=local_filename)
+            with MetricTimer("VideoDownloadDuration",{"VideoID":video_id_input}):
+                local_path = vi_service.download_youtube_video(video_url, output_path=local_filename)
         else:
             raise Exception("Please upload a valid YouTube URL")
 
         
-        s3_uri = vi_service.upload_video(local_path, video_name=video_id_input)
+        with MetricTimer("S2UploadDuration",{"VideoId":video_id_input}):
+            s3_uri = vi_service.upload_video(local_path, video_name=video_id_input)
         logger.info(f"Upload Success. S3 URI: {s3_uri}")
 
         
         vi_service.wait_for_processing(video_id_input)
+        put_metric("VideoUploaded",1,dimensions={"VideoId":video_id_input})
 
         
         if os.path.exists(local_path):
@@ -46,15 +54,20 @@ def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
             logger.info("Local temp file removed")
 
         
-        transcribe_job_name = vi_service.start_transcription(video_id_input)
-        label_job_id, text_job_id = vi_service.start_rekognition(video_id_input)
+        with MetricTimer("TranscriptionDuration",{"VideoId":video_id_input}):
+            transcribe_job_name = vi_service.start_transcription(video_id_input)
+            label_job_id, text_job_id = vi_service.start_rekognition(video_id_input)
 
-        transcript = vi_service.wait_for_transcription(job_name=transcribe_job_name)
-        label_response = vi_service.wait_for_rekognition(job_id=label_job_id, job_type="label")
-        text_response = vi_service.wait_for_rekognition(job_id=text_job_id, job_type="text")
+        with MetricTimer("RekongitionDuration",{"VideoId":{video_id_input}}):
+            transcript = vi_service.wait_for_transcription(job_name=transcribe_job_name)
+            label_response = vi_service.wait_for_rekognition(job_id=label_job_id, job_type="label")
+            text_response = vi_service.wait_for_rekognition(job_id=text_job_id, job_type="text")
 
         
         clean_data = vi_service.extract_data(transcript, label_response, text_response)
+
+        total_ms=(time.time()-start) *1000
+        put_metric("IndexingDuration(ms)",total_ms,unit="Milliseconds",dimensions={"VideoId":video_id_input})
         return clean_data
 
     except Exception as e:
@@ -73,10 +86,13 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
     """
 
     logger.info("[Node: Auditor] Querying knowledge base")
+    video_id=state.get("video_id","Unknown")
+    start=time.time()
 
     transcript = state.get("transcript", "")
     if not transcript:
         logger.warning("No transcript available. Skipping audit")
+        put_metric('AuditSkipped',1,dimensions={"Reason":"NoTranscript"})
         return {
             "final_result": "FAIL",
             "final_report": "Audit skipped — video processing failed (no transcript)"
@@ -115,7 +131,10 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
 
     ocr_text = state.get("ocr_text", [])
     query_text = f"{transcript} {' '.join(ocr_text)}"
-    docs = vector_store.similarity_search(query_text, k=4)
+
+    with MetricTimer("PineConeQueryDuration",{"VideoId":video_id}):
+        docs = vector_store.similarity_search(query_text, k=4)
+
     retrieved_rules = "\n\n".join([doc.page_content for doc in docs])
 
     system_prompt = f"""
@@ -148,10 +167,11 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
 
     response = None
     try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_message)
-        ])
+        with MetricTimer("LLMInterfaceDuration",{"VideoId":video_id}):
+            response = llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_message)
+            ])
 
         content = response.content
 
@@ -161,7 +181,17 @@ def audio_content_node(state: VideoAuditState) -> Dict[str, Any]:
                 content = match.group(1)
 
         audit_data = json.loads(content.strip())
+        violation=audit_data.get("compliance_result",[])
+        status=audit_data.get("status","FAIL")
 
+        total_time=(time.time() -start) *1000
+        log_audit_event(
+            video_id=video_id,
+            status=status,
+            violations=len(violation),
+            duration_ms=total_time
+        )
+        
         return {
             "compliance_result": audit_data.get("compliance_results", []),
             "final_result": audit_data.get("status", "FAIL"),
