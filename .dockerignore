@@ -1,0 +1,34 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+myenv/
+
+# Secrets (never bake into image)
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Test / CI
+.pytest_cache/
+htmlcov/
+.coverage
+
+# uv lock (already handled at build time)
+# uv.lock   ← keep this so the image build uses locked deps
+
+# Git
+.git/
+.gitignore
